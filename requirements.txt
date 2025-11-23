@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+playwright
+requests
+pydantic
+google-generativeai
+pandas
+numpy
+beautifulsoup4
+pdfplumber
+pypdf
+python-multipart
+python-dotenv
