@@ -7,6 +7,8 @@ services:
     startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     plan: free
     envVars:
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /opt/render/.cache/ms-playwright
       - key: GEMINI_API_KEY
         sync: false
       - key: STUDENT_EMAIL
