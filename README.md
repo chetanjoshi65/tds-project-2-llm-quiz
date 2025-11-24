@@ -57,8 +57,8 @@ tds-project-2/
 
 ## ⚙️ Environment Variables
 Create a `.env` file locally (DO NOT commit it):
-GEMINI_API_KEY=your_key_here
-STUDENT_EMAIL=24f2008611@ds.study.iitm.ac.in
+GEMINI_API_KEY= 'GEMINI_API_KEY'
+STUDENT_EMAIL=23ds3000028@ds.study.iitm.ac.in
 STUDENT_SECRET=your_secret_here
 TEST_SERVER_URL=https://your-render-url.onrender.com
 

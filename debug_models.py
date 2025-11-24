@@ -1,5 +1,7 @@
 import os
 import google.generativeai as genai
+from dotenv import load_dotenv
+load_dotenv()
 
 def list_available_models():
     print("Checking available Gemini models...")

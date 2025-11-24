@@ -1,6 +1,7 @@
 import os
 import google.generativeai as genai
-
+from dotenv import load_dotenv
+load_dotenv()
 def test_gemini():
     print("1. Loading GEMINI_API_KEY from environment...")
 
