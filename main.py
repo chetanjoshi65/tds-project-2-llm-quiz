@@ -49,7 +49,7 @@ def fetch_html_sync(url: str) -> str:
         with sync_playwright() as p:
             browser = p.chromium.launch(
                 headless=True,
-                args=args=[
+                args=[
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
