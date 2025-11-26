@@ -145,7 +145,97 @@ def submit_answer(submit_url, original_url, answer):
 # ---------------------------------------------------------------------------
 # API ENDPOINT
 # ---------------------------------------------------------------------------
+
 @app.post("/")
+async def root(task: QuizRequest):
+    """
+    Main endpoint to solve quiz - handles multi-step chains
+    """
+    try:
+        print(f"📥 Received quiz request for: {task.url}")
+        
+        if task.secret != STUDENT_SECRET:
+            raise HTTPException(status_code=403, detail="Invalid secret")
+
+        current_url = task.url
+        max_iterations = 10  # Prevent infinite loops
+        all_results = []
+        
+        for iteration in range(max_iterations):
+            print(f"\n🔄 Quiz step {iteration + 1}/{max_iterations}")
+            print(f"📍 URL: {current_url}")
+            
+            # Fetch HTML
+            print("🌐 Fetching HTML...")
+            html = await fetch_html(current_url)
+            print(f"✅ HTML fetched: {len(html)} chars")
+
+            # Parse quiz
+            print("🤖 Parsing quiz with Gemini...")
+            parsed = parse_quiz(html)
+            print(f"✅ Parsed: {parsed}")
+
+            question = parsed.get("question", "")
+            submit_url = parsed.get("submit_url", "")
+            
+            if not question or not submit_url:
+                print("⚠️  No question or submit URL found - ending chain")
+                break
+
+            # Solve question
+            print(f"💡 Solving: {question}")
+            answer = solve_question(question)
+            print(f"✅ Answer: {answer}")
+
+            # Submit answer
+            print("📤 Submitting answer...")
+            result = submit_answer(submit_url, current_url, answer)
+            print(f"✅ Result: {result}")
+            
+            all_results.append({
+                "step": iteration + 1,
+                "question": question,
+                "answer": answer,
+                "result": result
+            })
+            
+            # Check if there's a next quiz
+            next_url = result.get("url", "")
+            
+            if not next_url or not next_url.startswith("http"):
+                print("✅ Quiz chain complete - no more quizzes")
+                break
+            
+            if result.get("correct") == False:
+                print("❌ Answer was incorrect - stopping chain")
+                break
+                
+            # Continue to next quiz
+            current_url = next_url
+            print(f"➡️  Moving to next quiz: {next_url}")
+        
+        # Return the final result
+        final_result = all_results[-1]["result"] if all_results else {
+            "correct": False,
+            "reason": "No quizzes were solved",
+            "url": "",
+            "delay": None
+        }
+        
+        print(f"\n🎉 Completed {len(all_results)} quiz(zes)")
+        return final_result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+
+'''@app.post("/")
 async def root(task: QuizRequest):
     """Main endpoint to solve quiz"""
     try:
@@ -191,7 +281,7 @@ async def root(task: QuizRequest):
         print(f"❌ Error: {e}")
         import traceback
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e))'''
 
 
 # ---------------------------------------------------------------------------
