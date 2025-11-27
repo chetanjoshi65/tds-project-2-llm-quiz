@@ -1,6 +1,6 @@
 """
 TDS Quiz Solver - Complete Implementation
-Handles: Multi-step chains, HTML/API scraping, data extraction, file processing
+Handles: Multi-step chains, HTML/API scraping, data extraction, file processing, pagination
 """
 
 import os
@@ -9,6 +9,7 @@ import requests
 import asyncio
 import re
 import base64
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Dict, Any, List
 from fastapi import FastAPI, HTTPException
@@ -72,6 +73,101 @@ async def fetch_html(url: str) -> str:
     return await loop.run_in_executor(executor, fetch_html_sync, url)
 
 # =============================================================================
+# API DATA FETCHING & PAGINATION
+# =============================================================================
+def fetch_api_data(url: str, max_pages: int = 50) -> List[Dict]:
+    """
+    Fetch data from API with pagination support
+    Continues until empty list is returned
+    """
+    all_data = []
+    page = 1
+    
+    print(f"🌐 Fetching API data from: {url}")
+    
+    while page <= max_pages:
+        try:
+            # Build paginated URL
+            if 'page=' in url:
+                # Replace existing page number
+                paginated_url = re.sub(r'page=\d+', f'page={page}', url)
+            elif '?' in url:
+                # Add page parameter to existing query string
+                paginated_url = f"{url}&page={page}"
+            else:
+                # Add page parameter as first query param
+                paginated_url = f"{url}?page={page}"
+            
+            print(f"  📄 Fetching page {page}: {paginated_url}")
+            
+            response = requests.get(paginated_url, timeout=10)
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # Check if empty (end of pagination)
+            if not data or (isinstance(data, list) and len(data) == 0):
+                print(f"  ✅ Reached end at page {page} (empty response)")
+                break
+            
+            # Handle different response formats
+            if isinstance(data, list):
+                all_data.extend(data)
+                print(f"  ✓ Got {len(data)} items from page {page}")
+            elif isinstance(data, dict):
+                # Might be wrapped in a key like 'items' or 'data'
+                items = data.get('items', data.get('data', data.get('results', [data])))
+                if isinstance(items, list):
+                    all_data.extend(items)
+                    print(f"  ✓ Got {len(items)} items from page {page}")
+                else:
+                    all_data.append(data)
+                    print(f"  ✓ Got 1 item from page {page}")
+            
+            page += 1
+            time.sleep(0.1)  # Be nice to the API
+            
+        except requests.exceptions.RequestException as e:
+            print(f"  ⚠️ Error fetching page {page}: {e}")
+            break
+        except Exception as e:
+            print(f"  ⚠️ Parse error page {page}: {e}")
+            break
+    
+    print(f"✅ Total items fetched: {len(all_data)}")
+    return all_data
+
+
+def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
+    """
+    Search for specific data in fetched results
+    Returns the value based on search criteria
+    """
+    print(f"🔍 Searching for: {search_criteria}")
+    
+    # Pattern: "item with ID 99"
+    id_match = re.search(r'id[:\s]+(\d+)', search_criteria.lower())
+    if id_match:
+        target_id = int(id_match.group(1))
+        print(f"  Looking for ID: {target_id}")
+        
+        for item in data:
+            if isinstance(item, dict):
+                # Try different ID field names
+                item_id = item.get('id') or item.get('ID') or item.get('_id')
+                
+                if item_id == target_id or str(item_id) == str(target_id):
+                    # Found it! Return the name
+                    name = item.get('name') or item.get('Name') or item.get('title') or item.get('value') or str(item)
+                    print(f"  ✅ Found: ID {target_id} → {name}")
+                    return name
+    
+    # Pattern: search by other criteria
+    # Add more patterns as needed
+    
+    return None
+
+# =============================================================================
 # SMART HTML DATA EXTRACTION
 # =============================================================================
 def extract_from_html(html: str, instructions: str) -> Optional[str]:
@@ -118,13 +214,15 @@ def extract_from_html(html: str, instructions: str) -> Optional[str]:
         if 'hidden' in inst_lower or 'secret' in inst_lower:
             # Try common hidden element patterns
             for elem in soup.find_all(['div', 'span', 'p']):
-                if any(word in elem.get('class', []) for word in ['hidden', 'secret', 'password', 'key']):
-                    text = elem.get_text().strip()
-                    if text:
-                        print(f"✓ Found hidden element: {text}")
-                        if 'revers' in inst_lower:
-                            text = text[::-1]
-                        return text
+                elem_classes = elem.get('class', [])
+                if isinstance(elem_classes, list):
+                    if any(word in ' '.join(elem_classes).lower() for word in ['hidden', 'secret', 'password', 'key']):
+                        text = elem.get_text().strip()
+                        if text:
+                            print(f"✓ Found hidden element: {text}")
+                            if 'revers' in inst_lower:
+                                text = text[::-1]
+                            return text
         
         return None
         
@@ -144,7 +242,7 @@ Extract quiz information from this HTML and return ONLY valid JSON:
 {{
   "question": "the question text",
   "submit_url": "the submit URL (absolute or relative)",
-  "data_sources": ["any data/hints provided as array"],
+  "data_sources": ["any data/hints/URLs provided as array"],
   "instructions": "any special instructions for solving"
 }}
 
@@ -185,19 +283,52 @@ Return ONLY the JSON, no other text.
         raise RuntimeError(f"Failed to parse quiz: {e}")
 
 # =============================================================================
-# SOLVE QUESTION (Smart extraction + LLM)
+# SOLVE QUESTION (Smart extraction + API + LLM)
 # =============================================================================
 def solve_question(question: str, data_sources: List[str], instructions: str, html: str) -> str:
     """
     Solve quiz question intelligently:
-    1. Try smart HTML extraction if applicable
-    2. Use LLM with full context if extraction fails
+    1. Check if API call needed → fetch and search data
+    2. Try smart HTML extraction if applicable
+    3. Use LLM with full context if extraction fails
     """
     
     # Combine instructions
     all_instructions = ' '.join(data_sources) + ' ' + instructions
     
-    # Try smart extraction first
+    # Check if this requires API fetching
+    api_urls = []
+    for source in data_sources:
+        if isinstance(source, str) and source.startswith('http') and '/api/' in source:
+            api_urls.append(source)
+    
+    context_data = ""
+    
+    if api_urls:
+        print(f"🌐 Detected API data source: {api_urls}")
+        
+        # Fetch API data
+        all_api_data = []
+        for api_url in api_urls:
+            data = fetch_api_data(api_url)
+            all_api_data.extend(data)
+        
+        print(f"📊 Total API data items: {len(all_api_data)}")
+        
+        # Search for answer in data
+        answer = search_in_data(all_api_data, question)
+        
+        if answer:
+            print(f"✅ Found answer in API data: {answer}")
+            return answer
+        else:
+            print(f"⚠️ Could not find answer in API data, trying LLM...")
+            # Pass data to LLM
+            context_data = f"\n\nAPI Data (first 10 items):\n{json.dumps(all_api_data[:10], indent=2)}\n"
+            context_data += f"\nTotal items: {len(all_api_data)}\n"
+            context_data += f"All IDs: {[item.get('id', 'N/A') for item in all_api_data[:20]]}\n"
+    
+    # Try smart HTML extraction
     if html and any(word in all_instructions.lower() for word in 
                     ['html', 'div', 'class', 'id', 'hidden', 'revers', 'element']):
         print("🔍 Attempting smart HTML extraction...")
@@ -209,13 +340,14 @@ def solve_question(question: str, data_sources: List[str], instructions: str, ht
     # Fallback to LLM
     print("🤖 Using LLM to solve...")
     
-    # Build comprehensive context
     context = f"""
 Question: {question}
 
 Instructions: {all_instructions}
 
 Data sources: {json.dumps(data_sources)}
+
+{context_data}
 
 HTML content (relevant parts):
 {html[:6000] if html else "N/A"}
@@ -227,17 +359,18 @@ HTML content (relevant parts):
 Solve this quiz question following these rules:
 
 1. READ ALL INSTRUCTIONS CAREFULLY
-2. If data is in HTML, EXTRACT it (check for classes, IDs, hidden elements)
-3. Apply transformations (reverse text, decode base64, etc.)
-4. Calculate or process as needed
-5. Return ONLY the final answer (no explanations)
+2. If API data is provided above, SEARCH through it for the answer
+3. If data is in HTML, EXTRACT it (check for classes, IDs, hidden elements)
+4. Apply transformations (reverse text, decode base64, etc.)
+5. Calculate or process as needed
+6. Return ONLY the final answer (no explanations)
 
 Important:
 - Maximum 100 characters
 - Direct answer only
-- If it's a password/code, give exact value
+- If it's a name, give just the name
 - If it's a number, give just the number
-- If it's a calculation, give the result
+- If searching for ID, give the associated value (like name)
 
 Answer:"""
     
@@ -250,7 +383,7 @@ Answer:"""
         answer = lines[0] if lines else answer
         
         # Remove common prefixes
-        for prefix in ['Answer:', 'The answer is:', 'Result:', 'answer:', 'A:']:
+        for prefix in ['Answer:', 'The answer is:', 'Result:', 'answer:', 'A:', 'The name is:', 'Name:']:
             if answer.lower().startswith(prefix.lower()):
                 answer = answer[len(prefix):].strip()
         
