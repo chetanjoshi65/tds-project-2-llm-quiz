@@ -5,9 +5,10 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict
-from playwright.sync_api import sync_playwright  # ✅ Use sync API
+from playwright.sync_api import sync_playwright
 import google.generativeai as genai
 from dotenv import load_dotenv
+from urllib.parse import urlparse
 
 load_dotenv()
 
@@ -24,7 +25,7 @@ if not GEMINI_API_KEY or not STUDENT_EMAIL or not STUDENT_SECRET:
 genai.configure(api_key=GEMINI_API_KEY)
 llm = genai.GenerativeModel("models/gemini-2.5-flash")
 
-# ✅ Create thread pool executor for blocking operations
+# Create thread pool executor
 executor = ThreadPoolExecutor(max_workers=3)
 
 # ---------------------------------------------------------------------------
@@ -41,7 +42,7 @@ class QuizRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# FETCH HTML (Sync version for thread execution)
+# FETCH HTML
 # ---------------------------------------------------------------------------
 def fetch_html_sync(url: str) -> str:
     """Sync version that runs in thread pool"""
@@ -70,27 +71,28 @@ def fetch_html_sync(url: str) -> str:
 
 
 async def fetch_html(url: str) -> str:
-    """Async wrapper that runs sync playwright in thread"""
+    """Async wrapper"""
     loop = asyncio.get_event_loop()
     return await loop.run_in_executor(executor, fetch_html_sync, url)
 
 
 # ---------------------------------------------------------------------------
-# PARSE QUIZ (LLM)
+# PARSE QUIZ
 # ---------------------------------------------------------------------------
 def parse_quiz(html: str):
+    """Extract question, submit URL, and data from HTML"""
     prompt = f"""
-Extract and return ONLY valid JSON:
+Extract and return ONLY valid JSON with these fields:
 
-1. question text
-2. submit_url
-3. any required data
+1. question: the quiz question text
+2. submit_url: the URL to submit the answer
+3. data_sources: any data/hints provided (as array)
 
-Format:
+Return ONLY this JSON format:
 {{
-  "question":"...",
-  "submit_url":"...",
-  "data_sources":[]
+  "question": "the question text",
+  "submit_url": "the submit URL",
+  "data_sources": ["data1", "data2"]
 }}
 
 HTML (first 3000 chars):
@@ -106,24 +108,76 @@ HTML (first 3000 chars):
         end = text.rindex("}") + 1
         return json.loads(text[start:end])
     except Exception as e:
-        print(f"❌ Failed to parse JSON from LLM response: {text[:200]}")
-        raise RuntimeError(f"Failed to parse quiz metadata: {e}")
+        print(f"❌ Failed to parse JSON from LLM: {text[:200]}")
+        raise RuntimeError(f"Failed to parse quiz: {e}")
 
 
 # ---------------------------------------------------------------------------
-# SOLVE QUIZ (basic)
+# SOLVE QUESTION
 # ---------------------------------------------------------------------------
-def solve_question(question: str):
-    response = llm.generate_content(
-        f"Answer this question clearly and correctly: {question}"
-    )
-    return response.text.strip()
+def solve_question(question: str, data_sources: list = None):
+    """Solve quiz question using provided data"""
+    
+    # Build context
+    context = f"Question: {question}\n"
+    
+    if data_sources:
+        context += f"\nAvailable data: {', '.join(str(d) for d in data_sources)}\n"
+    
+    prompt = f"""
+{context}
+
+Solve this quiz question step by step, then provide ONLY the final answer.
+
+Instructions:
+- Use the data provided above
+- Think through the problem
+- Give a SHORT, DIRECT answer (max 50 characters)
+- No explanations in the final answer
+
+Format your response as:
+Reasoning: [your thinking process]
+Answer: [just the final answer]
+
+Solve now:"""
+    
+    response = llm.generate_content(prompt)
+    text = response.text.strip()
+    
+    # Extract answer
+    lines = [l.strip() for l in text.split('\n') if l.strip()]
+    
+    # Look for "Answer:" line
+    for line in reversed(lines):
+        if 'answer:' in line.lower():
+            answer = line.split(':', 1)[1].strip()
+            # Remove quotes
+            answer = answer.strip('"\'')
+            return answer
+    
+    # Fallback: take last line
+    answer = lines[-1] if lines else "ERROR"
+    
+    # Clean up common prefixes
+    for prefix in ["Answer:", "The answer is:", "Result:", "Final answer:"]:
+        if answer.lower().startswith(prefix.lower()):
+            answer = answer[len(prefix):].strip()
+    
+    return answer.strip('"\'')
 
 
 # ---------------------------------------------------------------------------
 # SUBMIT ANSWER
 # ---------------------------------------------------------------------------
 def submit_answer(submit_url, original_url, answer):
+    """Submit answer - handles relative URLs"""
+    
+    # Fix relative URLs
+    if submit_url.startswith('/'):
+        parsed = urlparse(original_url)
+        submit_url = f"{parsed.scheme}://{parsed.netloc}{submit_url}"
+        print(f"🔗 Converted relative URL to: {submit_url}")
+    
     payload = {
         "email": STUDENT_EMAIL,
         "secret": STUDENT_SECRET,
@@ -132,7 +186,7 @@ def submit_answer(submit_url, original_url, answer):
     }
 
     print(f"📤 Submitting to: {submit_url}")
-    print(f"📦 Payload: {payload}")
+    print(f"📦 Answer: {answer[:100]}...")
 
     try:
         resp = requests.post(submit_url, json=payload, timeout=10)
@@ -143,14 +197,11 @@ def submit_answer(submit_url, original_url, answer):
 
 
 # ---------------------------------------------------------------------------
-# API ENDPOINT
+# MAIN ENDPOINT
 # ---------------------------------------------------------------------------
-
 @app.post("/")
 async def root(task: QuizRequest):
-    """
-    Main endpoint to solve quiz - handles multi-step chains
-    """
+    """Main endpoint - handles multi-step quiz chains"""
     try:
         print(f"📥 Received quiz request for: {task.url}")
         
@@ -158,7 +209,7 @@ async def root(task: QuizRequest):
             raise HTTPException(status_code=403, detail="Invalid secret")
 
         current_url = task.url
-        max_iterations = 10  # Prevent infinite loops
+        max_iterations = 10
         all_results = []
         
         for iteration in range(max_iterations):
@@ -172,11 +223,12 @@ async def root(task: QuizRequest):
 
             # Parse quiz
             print("🤖 Parsing quiz with Gemini...")
-            parsed = parse_quiz(html)
+            parsed = parse_quiz(html)  # ✅ FIXED - only pass html
             print(f"✅ Parsed: {parsed}")
 
             question = parsed.get("question", "")
             submit_url = parsed.get("submit_url", "")
+            data_sources = parsed.get("data_sources", [])
             
             if not question or not submit_url:
                 print("⚠️  No question or submit URL found - ending chain")
@@ -184,7 +236,9 @@ async def root(task: QuizRequest):
 
             # Solve question
             print(f"💡 Solving: {question}")
-            answer = solve_question(question)
+            if data_sources:
+                print(f"📊 Using data: {data_sources}")
+            answer = solve_question(question, data_sources)
             print(f"✅ Answer: {answer}")
 
             # Submit answer
@@ -234,56 +288,8 @@ async def root(task: QuizRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
-'''@app.post("/")
-async def root(task: QuizRequest):
-    """Main endpoint to solve quiz"""
-    try:
-        print(f"📥 Received quiz request for: {task.url}")
-
-        if task.secret != STUDENT_SECRET:
-            raise HTTPException(status_code=403, detail="Invalid secret")
-
-        # Fetch HTML (runs in thread pool)
-        print("🌐 Fetching HTML...")
-        html = await fetch_html(task.url)
-        print(f"✅ HTML fetched: {len(html)} chars")
-
-        # Parse quiz
-        print("🤖 Parsing quiz with Gemini...")
-        parsed = parse_quiz(html)
-        print(f"✅ Parsed: {parsed}")
-
-        question = parsed.get("question", "")
-        submit_url = parsed.get("submit_url", "")
-
-        if not question or not submit_url:
-            raise HTTPException(
-                status_code=400,
-                detail="Could not extract question or submit_url"
-            )
-
-        # Solve question
-        print(f"💡 Solving: {question}")
-        answer = solve_question(question)
-        print(f"✅ Answer: {answer}")
-
-        # Submit answer
-        print("📤 Submitting answer...")
-        result = submit_answer(submit_url, task.url, answer)
-        print(f"✅ Result: {result}")
-
-        return result
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))'''
-
-
+# ---------------------------------------------------------------------------
+# HEALTH ENDPOINTS
 # ---------------------------------------------------------------------------
 @app.get("/")
 def home():
@@ -297,6 +303,17 @@ def home():
 @app.get("/health")
 def health():
     return {"status": "healthy"}
+
+
+
+
+
+
+
+
+
+
+
 
 
 
