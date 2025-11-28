@@ -106,7 +106,7 @@ def extract_headers_from_instructions(instructions: str) -> Dict[str, str]:
 # =============================================================================
 def clean_price(price: Any) -> Optional[float]:
     """
-    Clean a single price value
+    Clean a single price value - COMPREHENSIVE version
     Returns float or None if invalid
     """
     if price is None:
@@ -114,25 +114,39 @@ def clean_price(price: Any) -> Optional[float]:
     
     # If already a number
     if isinstance(price, (int, float)):
-        return float(price)
+        # Check if it's a valid number (not NaN or infinity)
+        try:
+            if price != price or price == float('inf') or price == float('-inf'):  # NaN check
+                return None
+            return float(price)
+        except:
+            return None
     
     # If string, clean it
     if isinstance(price, str):
-        # Remove common symbols and whitespace
+        # Remove whitespace
         cleaned = price.strip()
         
-        # Check for "invalid", "null", "N/A", etc.
-        if cleaned.lower() in ['invalid', 'null', 'n/a', 'na', 'none', '', 'undefined']:
+        # Check for invalid strings (case-insensitive)
+        if not cleaned or cleaned.lower() in ['invalid', 'null', 'n/a', 'na', 'none', 'undefined', 'nan', '']:
             return None
         
-        # Remove currency symbols
+        # Remove currency symbols and thousands separators
         cleaned = cleaned.replace('$', '').replace('€', '').replace('£', '').replace('₹', '')
-        cleaned = cleaned.replace(',', '')  # Remove thousands separator
-        cleaned = cleaned.strip()
+        cleaned = cleaned.replace(',', '')  # Remove commas
+        cleaned = cleaned.replace(' ', '')  # Remove spaces
         
-        # Check if it's a valid number
+        # Handle special cases
+        if cleaned.lower() == 'free' or cleaned == '0':
+            return 0.0
+        
+        # Try to parse as float
         try:
-            return float(cleaned)
+            value = float(cleaned)
+            # Check if it's a valid number (not NaN or infinity)
+            if value != value or value == float('inf') or value == float('-inf'):
+                return None
+            return value
         except ValueError:
             # Not a valid number
             return None
@@ -142,10 +156,11 @@ def clean_price(price: Any) -> Optional[float]:
 # =============================================================================
 # API DATA FETCHING & PAGINATION
 # =============================================================================
-def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 50) -> List[Dict]:
+def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 100) -> List[Dict]:
     """
     Fetch data from API with pagination support and custom headers
     Continues until empty list is returned
+    Increased max_pages to 100
     """
     all_data = []
     page = 1
@@ -167,7 +182,8 @@ def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 50
             else:
                 paginated_url = f"{url}?page={page}"
             
-            print(f"  📄 Fetching page {page}: {paginated_url}")
+            if page % 10 == 1:  # Log every 10th page
+                print(f"  📄 Fetching page {page}...")
             
             # Make request with headers
             response = requests.get(paginated_url, headers=headers, timeout=10)
@@ -183,7 +199,6 @@ def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 50
             # Handle different response formats
             if isinstance(data, list):
                 all_data.extend(data)
-                print(f"  ✓ Got {len(data)} items from page {page}")
             elif isinstance(data, dict):
                 # Check if this is a single page response (not paginated)
                 items = None
@@ -197,7 +212,6 @@ def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 50
                 
                 if isinstance(items, list):
                     all_data.extend(items)
-                    print(f"  ✓ Got {len(items)} items from page {page}")
                     
                     # If we got data in a non-paginated format, stop after first page
                     if page == 1 and any(key in data for key in ['cities', 'weather', 'data']):
@@ -205,11 +219,10 @@ def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 50
                         break
                 else:
                     all_data.append(data)
-                    print(f"  ✓ Got 1 item from page {page}")
                     break
             
             page += 1
-            time.sleep(0.1)
+            time.sleep(0.05)  # Reduced delay
             
         except requests.exceptions.HTTPError as e:
             print(f"  ⚠️ HTTP Error on page {page}: {e}")
@@ -255,7 +268,7 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
     Search for specific data in fetched results
     Returns the value based on search criteria
     """
-    print(f"🔍 Searching for: {search_criteria}")
+    print(f"🔍 Searching for: {search_criteria[:150]}...")
     
     # Pattern 1: "item with ID 99"
     id_match = re.search(r'id[:\s]+(\d+)', search_criteria.lower())
@@ -333,30 +346,47 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         total = 0.0
         valid_count = 0
         invalid_count = 0
+        no_price_field = 0
+        
+        # Sample first few items for debugging
+        print(f"  🔬 Sample data (first 3 items):")
+        for i, item in enumerate(data[:3]):
+            if isinstance(item, dict):
+                price_val = item.get('price', 'NO_FIELD')
+                print(f"     Item {i+1}: {item}")
         
         for item in data:
             if isinstance(item, dict):
                 # Try different price field names
-                price = item.get('price') or item.get('Price') or item.get('cost') or item.get('value')
+                price = item.get('price')
+                if price is None:
+                    price = item.get('Price') or item.get('cost') or item.get('value') or item.get('amount')
                 
-                if price is not None:
-                    # Clean the price
-                    cleaned_price = clean_price(price)
-                    
-                    if cleaned_price is not None:
-                        total += cleaned_price
-                        valid_count += 1
-                    else:
-                        invalid_count += 1
+                if price is None:
+                    # No price field at all
+                    no_price_field += 1
+                    continue
+                
+                # Clean the price
+                cleaned_price = clean_price(price)
+                
+                if cleaned_price is not None:
+                    total += cleaned_price
+                    valid_count += 1
+                else:
+                    invalid_count += 1
         
         print(f"  ✓ Valid prices: {valid_count}")
         print(f"  ✓ Invalid/skipped: {invalid_count}")
+        print(f"  ✓ No price field: {no_price_field}")
+        print(f"  ✓ Total items checked: {len(data)}")
+        print(f"  ✓ Sum verification: {valid_count} + {invalid_count} + {no_price_field} = {valid_count + invalid_count + no_price_field}")
         print(f"  ✓ Total sum: {total}")
         
         # Return as integer if it's a whole number
         if total == int(total):
             return str(int(total))
-        return str(total)
+        return str(round(total, 2))
     
     return None
 
