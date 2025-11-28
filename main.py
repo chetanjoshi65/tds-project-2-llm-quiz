@@ -140,7 +140,7 @@ def clean_price(price: Any) -> Optional[float]:
         
         # Check for invalid strings (case-insensitive)
         if not cleaned or cleaned.lower() in ['invalid', 'null', 'n/a', 'na', 'none', 'undefined', 'nan', '', 'free']:
-            return None  # ← CHANGED: "free" returns None, not 0
+            return None
         
         # Remove currency symbols and thousands separators
         cleaned = cleaned.replace('$', '').replace('€', '').replace('£', '').replace('₹', '')
@@ -352,7 +352,24 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
     if ('sum' in search_criteria.lower() and 'price' in search_criteria.lower()) or \
        'clean' in search_criteria.lower() or \
        ('calculate' in search_criteria.lower() and 'sum' in search_criteria.lower()):
-        print(f"  💰 Calculating sum of prices (NO deduplication - sum ALL items)...")
+        print(f"  💰 Calculating sum of prices...")
+        
+        # DEDUPLICATE by ID first!
+        seen_ids = set()
+        unique_data = []
+        duplicates = 0
+        
+        for item in data:
+            if isinstance(item, dict):
+                item_id = item.get('id') or item.get('ID') or item.get('_id')
+                if item_id is not None:
+                    if item_id in seen_ids:
+                        duplicates += 1
+                        continue
+                    seen_ids.add(item_id)
+                unique_data.append(item)
+        
+        print(f"  🔄 Deduplication: {len(data)} → {len(unique_data)} items (removed {duplicates} duplicates)")
         
         total = 0.0
         valid_count = 0
@@ -360,14 +377,14 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         no_price_field = 0
         
         # Sample first few items for debugging
-        print(f"  🔬 Sample data (first 3 items):")
-        for i, item in enumerate(data[:3]):
+        print(f"  🔬 Sample unique items (first 7):")
+        for i, item in enumerate(unique_data[:7]):
             if isinstance(item, dict):
                 price_val = item.get('price', 'NO_FIELD')
                 cleaned = clean_price(price_val) if price_val != 'NO_FIELD' else None
                 print(f"     Item {i+1}: {item} → cleaned: {cleaned}")
         
-        for item in data:
+        for item in unique_data:
             if isinstance(item, dict):
                 # Try different price field names
                 price = item.get('price')
@@ -390,8 +407,7 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         print(f"  ✓ Valid prices: {valid_count}")
         print(f"  ✓ Invalid/skipped: {invalid_count}")
         print(f"  ✓ No price field: {no_price_field}")
-        print(f"  ✓ Total items checked: {len(data)}")
-        print(f"  ✓ Verification: {valid_count} + {invalid_count} + {no_price_field} = {valid_count + invalid_count + no_price_field}")
+        print(f"  ✓ Total unique items: {len(unique_data)}")
         print(f"  ✓ Total sum: {total}")
         
         # Return as integer if it's a whole number
@@ -444,8 +460,21 @@ def extract_from_html(html: str, instructions: str) -> Optional[str]:
                 
                 return text
         
-        # Pattern 3: Look for specific tag patterns
-        if 'hidden' in inst_lower or 'secret' in inst_lower:
+        # Pattern 3: Look for "secret" or "code" in text
+        if 'secret' in inst_lower or 'code' in inst_lower:
+            # Look for elements containing "secret" or "code"
+            for elem in soup.find_all(['div', 'span', 'p', 'h1', 'h2', 'h3', 'strong', 'b']):
+                text = elem.get_text().strip()
+                if text and ('secret' in text.lower() or 'code' in text.lower()):
+                    # Extract the actual code (usually follows "secret code:" or similar)
+                    code_match = re.search(r'(?:secret\s+code|code)[\s:]+([A-Za-z0-9\-]+)', text, re.IGNORECASE)
+                    if code_match:
+                        code = code_match.group(1)
+                        print(f"✓ Found secret code: {code}")
+                        return code
+        
+        # Pattern 4: Look for hidden elements
+        if 'hidden' in inst_lower:
             for elem in soup.find_all(['div', 'span', 'p']):
                 elem_classes = elem.get('class', [])
                 if isinstance(elem_classes, list):
@@ -518,7 +547,7 @@ Return ONLY the JSON, no other text.
 # =============================================================================
 # SOLVE QUESTION (Smart extraction + API + LLM)
 # =============================================================================
-def solve_question(question: str, data_sources: List[str], instructions: str, html: str) -> str:
+def solve_question(question: str, data_sources: List[str], instructions: str, html: str, current_url: str) -> str:
     """
     Solve quiz question intelligently:
     1. Extract required headers from instructions
@@ -533,18 +562,29 @@ def solve_question(question: str, data_sources: List[str], instructions: str, ht
     # Extract headers from instructions
     headers = extract_headers_from_instructions(all_instructions)
     
-    # Check if this requires API fetching
+    # Check if this requires API fetching or scraping
     api_urls = []
+    scrape_urls = []
+    
     for source in data_sources:
-        if isinstance(source, str) and source.startswith('http') and '/api/' in source:
-            api_urls.append(source)
+        if isinstance(source, str):
+            # Convert relative URLs to absolute
+            if source.startswith('/'):
+                source = urljoin(current_url, source)
+                print(f"  🔗 Converted relative URL: {source}")
+            
+            if source.startswith('http'):
+                if '/api/' in source:
+                    api_urls.append(source)
+                else:
+                    scrape_urls.append(source)
     
     context_data = ""
     
+    # Fetch API data
     if api_urls:
         print(f"🌐 Detected API data source: {api_urls}")
         
-        # Fetch API data with headers
         all_api_data = []
         for api_url in api_urls:
             data = fetch_api_data(api_url, headers=headers)
@@ -552,7 +592,6 @@ def solve_question(question: str, data_sources: List[str], instructions: str, ht
         
         print(f"📊 Total API data items: {len(all_api_data)}")
         
-        # Search for answer in data
         if all_api_data:
             answer = search_in_data(all_api_data, question + ' ' + all_instructions)
             
@@ -563,13 +602,34 @@ def solve_question(question: str, data_sources: List[str], instructions: str, ht
                 print(f"⚠️ Could not find answer in API data, trying LLM...")
                 context_data = f"\n\nAPI Data (sample):\n{json.dumps(all_api_data[:5], indent=2)}\n"
                 context_data += f"\nTotal items: {len(all_api_data)}\n"
-        else:
-            print(f"⚠️ No API data fetched, trying LLM...")
     
-    # Try smart HTML extraction
+    # Scrape additional URLs
+    if scrape_urls:
+        print(f"🌐 Scraping additional URLs: {scrape_urls}")
+        for scrape_url in scrape_urls:
+            try:
+                print(f"  📄 Fetching: {scrape_url}")
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                scraped_html = loop.run_until_complete(fetch_html(scrape_url))
+                loop.close()
+                print(f"  ✅ Fetched {len(scraped_html)} chars")
+                
+                # Try to extract from scraped HTML
+                extracted = extract_from_html(scraped_html, all_instructions + ' ' + question)
+                if extracted:
+                    print(f"✅ Extracted from scraped page: {extracted}")
+                    return extracted
+                
+                # Add to context for LLM
+                context_data += f"\n\nScraped HTML from {scrape_url}:\n{scraped_html[:2000]}\n"
+            except Exception as e:
+                print(f"  ⚠️ Failed to scrape {scrape_url}: {e}")
+    
+    # Try smart HTML extraction from current page
     if html and any(word in all_instructions.lower() for word in 
-                    ['html', 'div', 'class', 'id', 'hidden', 'revers', 'element']):
-        print("🔍 Attempting smart HTML extraction...")
+                    ['html', 'div', 'class', 'id', 'hidden', 'revers', 'element', 'secret', 'code']):
+        print("🔍 Attempting smart HTML extraction from current page...")
         extracted = extract_from_html(html, all_instructions)
         if extracted:
             print(f"✅ Smart extraction: {extracted}")
@@ -605,7 +665,7 @@ Solve this quiz question following these rules:
 Important:
 - Maximum 100 characters
 - Direct answer only
-- Just the value requested (name, number, city, sum, etc.)
+- Just the value requested (name, number, city, sum, code, etc.)
 
 Answer:"""
     
@@ -616,7 +676,7 @@ Answer:"""
         lines = [l.strip() for l in answer.split('\n') if l.strip()]
         answer = lines[0] if lines else answer
         
-        for prefix in ['Answer:', 'The answer is:', 'Result:', 'answer:', 'A:', 'The name is:', 'Name:', 'City:', 'The city is:', 'Sum:', 'Total:']:
+        for prefix in ['Answer:', 'The answer is:', 'Result:', 'answer:', 'A:', 'The name is:', 'Name:', 'City:', 'The city is:', 'Sum:', 'Total:', 'Code:', 'Secret:']:
             if answer.lower().startswith(prefix.lower()):
                 answer = answer[len(prefix):].strip()
         
@@ -726,7 +786,7 @@ async def solve_quiz_chain(task: QuizRequest):
                 if data_sources:
                     print(f"📊 Data: {data_sources}")
                 
-                answer = solve_question(question, data_sources, instructions, html)
+                answer = solve_question(question, data_sources, instructions, html, current_url)
                 print(f"✅ Answer: {answer}")
                 
                 # Submit answer
