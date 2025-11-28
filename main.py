@@ -341,24 +341,7 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
     if ('sum' in search_criteria.lower() and 'price' in search_criteria.lower()) or \
        'clean' in search_criteria.lower() or \
        ('calculate' in search_criteria.lower() and 'sum' in search_criteria.lower()):
-        print(f"  💰 Calculating sum of prices...")
-        
-        # DEDUPLICATE by ID first!
-        seen_ids = set()
-        unique_data = []
-        duplicates = 0
-        
-        for item in data:
-            if isinstance(item, dict):
-                item_id = item.get('id') or item.get('ID') or item.get('_id')
-                if item_id is not None:
-                    if item_id in seen_ids:
-                        duplicates += 1
-                        continue
-                    seen_ids.add(item_id)
-                unique_data.append(item)
-        
-        print(f"  🔄 Deduplication: {len(data)} → {len(unique_data)} items (removed {duplicates} duplicates)")
+        print(f"  💰 Calculating sum of prices (NO deduplication - sum ALL items)...")
         
         total = 0.0
         valid_count = 0
@@ -366,13 +349,13 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         no_price_field = 0
         
         # Sample first few items for debugging
-        print(f"  🔬 Sample data (first 3 unique items):")
-        for i, item in enumerate(unique_data[:3]):
+        print(f"  🔬 Sample data (first 3 items):")
+        for i, item in enumerate(data[:3]):
             if isinstance(item, dict):
                 price_val = item.get('price', 'NO_FIELD')
                 print(f"     Item {i+1}: {item}")
         
-        for item in unique_data:  # Use unique_data instead of data
+        for item in data:
             if isinstance(item, dict):
                 # Try different price field names
                 price = item.get('price')
@@ -395,7 +378,8 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         print(f"  ✓ Valid prices: {valid_count}")
         print(f"  ✓ Invalid/skipped: {invalid_count}")
         print(f"  ✓ No price field: {no_price_field}")
-        print(f"  ✓ Total unique items: {len(unique_data)}")
+        print(f"  ✓ Total items checked: {len(data)}")
+        print(f"  ✓ Verification: {valid_count} + {invalid_count} + {no_price_field} = {valid_count + invalid_count + no_price_field}")
         print(f"  ✓ Total sum: {total}")
         
         # Return as integer if it's a whole number
