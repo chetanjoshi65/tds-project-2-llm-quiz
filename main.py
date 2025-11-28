@@ -1,6 +1,6 @@
 """
 TDS Quiz Solver - Complete Implementation
-Handles: Multi-step chains, HTML/API scraping, data extraction, file processing, pagination
+Handles: Multi-step chains, HTML/API scraping, data extraction, file processing, pagination, API authentication
 """
 
 import os
@@ -73,34 +73,66 @@ async def fetch_html(url: str) -> str:
     return await loop.run_in_executor(executor, fetch_html_sync, url)
 
 # =============================================================================
+# HEADER EXTRACTION
+# =============================================================================
+def extract_headers_from_instructions(instructions: str) -> Dict[str, str]:
+    """
+    Extract required headers from instructions
+    Returns dict of headers
+    """
+    headers = {}
+    
+    # Pattern: "header X-API-Key with value weather-alpha-key"
+    header_pattern = r'header\s+[`"\']?([A-Za-z0-9\-]+)[`"\']?\s+with\s+value\s+[`"\']?([A-Za-z0-9\-]+)[`"\']?'
+    matches = re.findall(header_pattern, instructions, re.IGNORECASE)
+    
+    for header_name, header_value in matches:
+        headers[header_name] = header_value
+        print(f"🔑 Extracted header: {header_name} = {header_value}")
+    
+    # Pattern: "X-API-Key: weather-alpha-key"
+    header_pattern2 = r'[`"\']?([A-Za-z0-9\-]+)[`"\']?\s*:\s*[`"\']?([A-Za-z0-9\-]+)[`"\']?'
+    matches2 = re.findall(header_pattern2, instructions)
+    
+    for header_name, header_value in matches2:
+        if header_name.upper().startswith('X-') or 'API' in header_name.upper() or 'KEY' in header_name.upper():
+            headers[header_name] = header_value
+            print(f"🔑 Extracted header (alt pattern): {header_name} = {header_value}")
+    
+    return headers
+
+# =============================================================================
 # API DATA FETCHING & PAGINATION
 # =============================================================================
-def fetch_api_data(url: str, max_pages: int = 50) -> List[Dict]:
+def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 50) -> List[Dict]:
     """
-    Fetch data from API with pagination support
+    Fetch data from API with pagination support and custom headers
     Continues until empty list is returned
     """
     all_data = []
     page = 1
     
+    if headers is None:
+        headers = {}
+    
     print(f"🌐 Fetching API data from: {url}")
+    if headers:
+        print(f"🔑 Using headers: {headers}")
     
     while page <= max_pages:
         try:
             # Build paginated URL
             if 'page=' in url:
-                # Replace existing page number
                 paginated_url = re.sub(r'page=\d+', f'page={page}', url)
             elif '?' in url:
-                # Add page parameter to existing query string
                 paginated_url = f"{url}&page={page}"
             else:
-                # Add page parameter as first query param
                 paginated_url = f"{url}?page={page}"
             
             print(f"  📄 Fetching page {page}: {paginated_url}")
             
-            response = requests.get(paginated_url, timeout=10)
+            # Make request with headers
+            response = requests.get(paginated_url, headers=headers, timeout=10)
             response.raise_for_status()
             
             data = response.json()
@@ -115,23 +147,66 @@ def fetch_api_data(url: str, max_pages: int = 50) -> List[Dict]:
                 all_data.extend(data)
                 print(f"  ✓ Got {len(data)} items from page {page}")
             elif isinstance(data, dict):
-                # Might be wrapped in a key like 'items' or 'data'
-                items = data.get('items', data.get('data', data.get('results', [data])))
+                # Check if this is a single page response (not paginated)
+                # Try common keys for array data
+                items = None
+                for key in ['cities', 'data', 'weather', 'items', 'results']:
+                    if key in data:
+                        items = data[key]
+                        break
+                
+                if items is None:
+                    items = data.get('items', data.get('results', [data]))
+                
                 if isinstance(items, list):
                     all_data.extend(items)
                     print(f"  ✓ Got {len(items)} items from page {page}")
+                    
+                    # If we got data in a non-paginated format, stop after first page
+                    if page == 1 and any(key in data for key in ['cities', 'weather', 'data']):
+                        print(f"  ✅ Single-page API response detected")
+                        break
                 else:
                     all_data.append(data)
                     print(f"  ✓ Got 1 item from page {page}")
+                    break
             
             page += 1
-            time.sleep(0.1)  # Be nice to the API
+            time.sleep(0.1)
             
+        except requests.exceptions.HTTPError as e:
+            print(f"  ⚠️ HTTP Error on page {page}: {e}")
+            
+            # If first page fails with auth error, try without pagination
+            if page == 1 and (e.response.status_code == 403 or e.response.status_code == 401):
+                print(f"  ℹ️ Trying base URL without pagination...")
+                try:
+                    response = requests.get(url, headers=headers, timeout=10)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    if isinstance(data, list):
+                        all_data.extend(data)
+                        print(f"  ✓ Got {len(data)} items without pagination")
+                    elif isinstance(data, dict):
+                        # Extract array from dict
+                        for key in ['cities', 'data', 'weather', 'items', 'results']:
+                            if key in data and isinstance(data[key], list):
+                                all_data.extend(data[key])
+                                print(f"  ✓ Got {len(data[key])} items from '{key}' field")
+                                break
+                        else:
+                            all_data.append(data)
+                            print(f"  ✓ Got single object")
+                    
+                except Exception as e2:
+                    print(f"  ❌ Also failed without pagination: {e2}")
+            break
         except requests.exceptions.RequestException as e:
-            print(f"  ⚠️ Error fetching page {page}: {e}")
+            print(f"  ⚠️ Request error on page {page}: {e}")
             break
         except Exception as e:
-            print(f"  ⚠️ Parse error page {page}: {e}")
+            print(f"  ⚠️ Parse error on page {page}: {e}")
             break
     
     print(f"✅ Total items fetched: {len(all_data)}")
@@ -145,7 +220,7 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
     """
     print(f"🔍 Searching for: {search_criteria}")
     
-    # Pattern: "item with ID 99"
+    # Pattern 1: "item with ID 99"
     id_match = re.search(r'id[:\s]+(\d+)', search_criteria.lower())
     if id_match:
         target_id = int(id_match.group(1))
@@ -153,17 +228,65 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         
         for item in data:
             if isinstance(item, dict):
-                # Try different ID field names
                 item_id = item.get('id') or item.get('ID') or item.get('_id')
                 
                 if item_id == target_id or str(item_id) == str(target_id):
-                    # Found it! Return the name
                     name = item.get('name') or item.get('Name') or item.get('title') or item.get('value') or str(item)
                     print(f"  ✅ Found: ID {target_id} → {name}")
                     return name
     
-    # Pattern: search by other criteria
-    # Add more patterns as needed
+    # Pattern 2: "highest temperature"
+    if 'highest' in search_criteria.lower() and 'temperature' in search_criteria.lower():
+        print(f"  Looking for highest temperature...")
+        
+        max_temp = float('-inf')
+        max_city = None
+        
+        for item in data:
+            if isinstance(item, dict):
+                # Try different field names
+                temp = item.get('temperature') or item.get('temp') or item.get('Temperature') or item.get('Temp')
+                city = item.get('city') or item.get('name') or item.get('City') or item.get('location') or item.get('Name')
+                
+                if temp is not None and city:
+                    try:
+                        temp_value = float(temp)
+                        if temp_value > max_temp:
+                            max_temp = temp_value
+                            max_city = city
+                            print(f"  → New max: {city} at {temp}°")
+                    except ValueError:
+                        pass
+        
+        if max_city:
+            print(f"  ✅ Highest temperature: {max_city} ({max_temp}°)")
+            return max_city
+    
+    # Pattern 3: "lowest temperature"
+    if 'lowest' in search_criteria.lower() and 'temperature' in search_criteria.lower():
+        print(f"  Looking for lowest temperature...")
+        
+        min_temp = float('inf')
+        min_city = None
+        
+        for item in data:
+            if isinstance(item, dict):
+                temp = item.get('temperature') or item.get('temp') or item.get('Temperature') or item.get('Temp')
+                city = item.get('city') or item.get('name') or item.get('City') or item.get('location') or item.get('Name')
+                
+                if temp is not None and city:
+                    try:
+                        temp_value = float(temp)
+                        if temp_value < min_temp:
+                            min_temp = temp_value
+                            min_city = city
+                            print(f"  → New min: {city} at {temp}°")
+                    except ValueError:
+                        pass
+        
+        if min_city:
+            print(f"  ✅ Lowest temperature: {min_city} ({min_temp}°)")
+            return min_city
     
     return None
 
@@ -212,7 +335,6 @@ def extract_from_html(html: str, instructions: str) -> Optional[str]:
         
         # Pattern 3: Look for specific tag patterns
         if 'hidden' in inst_lower or 'secret' in inst_lower:
-            # Try common hidden element patterns
             for elem in soup.find_all(['div', 'span', 'p']):
                 elem_classes = elem.get('class', [])
                 if isinstance(elem_classes, list):
@@ -288,13 +410,17 @@ Return ONLY the JSON, no other text.
 def solve_question(question: str, data_sources: List[str], instructions: str, html: str) -> str:
     """
     Solve quiz question intelligently:
-    1. Check if API call needed → fetch and search data
-    2. Try smart HTML extraction if applicable
-    3. Use LLM with full context if extraction fails
+    1. Extract required headers from instructions
+    2. Check if API call needed → fetch with headers and search data
+    3. Try smart HTML extraction if applicable
+    4. Use LLM with full context if extraction fails
     """
     
     # Combine instructions
     all_instructions = ' '.join(data_sources) + ' ' + instructions
+    
+    # Extract headers from instructions
+    headers = extract_headers_from_instructions(all_instructions)
     
     # Check if this requires API fetching
     api_urls = []
@@ -307,26 +433,26 @@ def solve_question(question: str, data_sources: List[str], instructions: str, ht
     if api_urls:
         print(f"🌐 Detected API data source: {api_urls}")
         
-        # Fetch API data
+        # Fetch API data with headers
         all_api_data = []
         for api_url in api_urls:
-            data = fetch_api_data(api_url)
+            data = fetch_api_data(api_url, headers=headers)
             all_api_data.extend(data)
         
         print(f"📊 Total API data items: {len(all_api_data)}")
         
         # Search for answer in data
-        answer = search_in_data(all_api_data, question)
-        
-        if answer:
-            print(f"✅ Found answer in API data: {answer}")
-            return answer
+        if all_api_data:
+            answer = search_in_data(all_api_data, question)
+            
+            if answer:
+                print(f"✅ Found answer in API data: {answer}")
+                return answer
+            else:
+                print(f"⚠️ Could not find answer in API data, trying LLM...")
+                context_data = f"\n\nAPI Data:\n{json.dumps(all_api_data, indent=2)}\n"
         else:
-            print(f"⚠️ Could not find answer in API data, trying LLM...")
-            # Pass data to LLM
-            context_data = f"\n\nAPI Data (first 10 items):\n{json.dumps(all_api_data[:10], indent=2)}\n"
-            context_data += f"\nTotal items: {len(all_api_data)}\n"
-            context_data += f"All IDs: {[item.get('id', 'N/A') for item in all_api_data[:20]]}\n"
+            print(f"⚠️ No API data fetched, trying LLM...")
     
     # Try smart HTML extraction
     if html and any(word in all_instructions.lower() for word in 
@@ -359,18 +485,15 @@ HTML content (relevant parts):
 Solve this quiz question following these rules:
 
 1. READ ALL INSTRUCTIONS CAREFULLY
-2. If API data is provided above, SEARCH through it for the answer
-3. If data is in HTML, EXTRACT it (check for classes, IDs, hidden elements)
-4. Apply transformations (reverse text, decode base64, etc.)
-5. Calculate or process as needed
-6. Return ONLY the final answer (no explanations)
+2. If API data is provided above, ANALYZE it for the answer
+3. If data is in HTML, EXTRACT it
+4. Apply transformations as needed
+5. Return ONLY the final answer (no explanations)
 
 Important:
 - Maximum 100 characters
 - Direct answer only
-- If it's a name, give just the name
-- If it's a number, give just the number
-- If searching for ID, give the associated value (like name)
+- Just the value requested (name, number, city, etc.)
 
 Answer:"""
     
@@ -378,19 +501,15 @@ Answer:"""
         response = llm.generate_content(prompt)
         answer = response.text.strip()
         
-        # Clean up answer
         lines = [l.strip() for l in answer.split('\n') if l.strip()]
         answer = lines[0] if lines else answer
         
-        # Remove common prefixes
-        for prefix in ['Answer:', 'The answer is:', 'Result:', 'answer:', 'A:', 'The name is:', 'Name:']:
+        for prefix in ['Answer:', 'The answer is:', 'Result:', 'answer:', 'A:', 'The name is:', 'Name:', 'City:', 'The city is:']:
             if answer.lower().startswith(prefix.lower()):
                 answer = answer[len(prefix):].strip()
         
-        # Remove quotes
         answer = answer.strip('"\'`')
         
-        # Limit length
         if len(answer) > 200:
             answer = answer[:200]
         
