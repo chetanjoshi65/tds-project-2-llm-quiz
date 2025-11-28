@@ -1,6 +1,6 @@
 """
 TDS Quiz Solver - Complete Implementation
-Handles: Multi-step chains, HTML/API scraping, data extraction, file processing, pagination, API authentication
+Handles: Multi-step chains, HTML/API scraping, data extraction, file processing, pagination, API authentication, data cleaning
 """
 
 import os
@@ -102,6 +102,44 @@ def extract_headers_from_instructions(instructions: str) -> Dict[str, str]:
     return headers
 
 # =============================================================================
+# PRICE CLEANING HELPER
+# =============================================================================
+def clean_price(price: Any) -> Optional[float]:
+    """
+    Clean a single price value
+    Returns float or None if invalid
+    """
+    if price is None:
+        return None
+    
+    # If already a number
+    if isinstance(price, (int, float)):
+        return float(price)
+    
+    # If string, clean it
+    if isinstance(price, str):
+        # Remove common symbols and whitespace
+        cleaned = price.strip()
+        
+        # Check for "invalid", "null", "N/A", etc.
+        if cleaned.lower() in ['invalid', 'null', 'n/a', 'na', 'none', '', 'undefined']:
+            return None
+        
+        # Remove currency symbols
+        cleaned = cleaned.replace('$', '').replace('€', '').replace('£', '').replace('₹', '')
+        cleaned = cleaned.replace(',', '')  # Remove thousands separator
+        cleaned = cleaned.strip()
+        
+        # Check if it's a valid number
+        try:
+            return float(cleaned)
+        except ValueError:
+            # Not a valid number
+            return None
+    
+    return None
+
+# =============================================================================
 # API DATA FETCHING & PAGINATION
 # =============================================================================
 def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 50) -> List[Dict]:
@@ -148,7 +186,6 @@ def fetch_api_data(url: str, headers: Dict[str, str] = None, max_pages: int = 50
                 print(f"  ✓ Got {len(data)} items from page {page}")
             elif isinstance(data, dict):
                 # Check if this is a single page response (not paginated)
-                # Try common keys for array data
                 items = None
                 for key in ['cities', 'data', 'weather', 'items', 'results']:
                     if key in data:
@@ -244,7 +281,6 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         
         for item in data:
             if isinstance(item, dict):
-                # Try different field names
                 temp = item.get('temperature') or item.get('temp') or item.get('Temperature') or item.get('Temp')
                 city = item.get('city') or item.get('name') or item.get('City') or item.get('location') or item.get('Name')
                 
@@ -287,6 +323,40 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         if min_city:
             print(f"  ✅ Lowest temperature: {min_city} ({min_temp}°)")
             return min_city
+    
+    # Pattern 4: "sum of prices" or "calculate sum" or "clean data"
+    if ('sum' in search_criteria.lower() and 'price' in search_criteria.lower()) or \
+       'clean' in search_criteria.lower() or \
+       ('calculate' in search_criteria.lower() and 'sum' in search_criteria.lower()):
+        print(f"  💰 Calculating sum of prices...")
+        
+        total = 0.0
+        valid_count = 0
+        invalid_count = 0
+        
+        for item in data:
+            if isinstance(item, dict):
+                # Try different price field names
+                price = item.get('price') or item.get('Price') or item.get('cost') or item.get('value')
+                
+                if price is not None:
+                    # Clean the price
+                    cleaned_price = clean_price(price)
+                    
+                    if cleaned_price is not None:
+                        total += cleaned_price
+                        valid_count += 1
+                    else:
+                        invalid_count += 1
+        
+        print(f"  ✓ Valid prices: {valid_count}")
+        print(f"  ✓ Invalid/skipped: {invalid_count}")
+        print(f"  ✓ Total sum: {total}")
+        
+        # Return as integer if it's a whole number
+        if total == int(total):
+            return str(int(total))
+        return str(total)
     
     return None
 
@@ -443,14 +513,15 @@ def solve_question(question: str, data_sources: List[str], instructions: str, ht
         
         # Search for answer in data
         if all_api_data:
-            answer = search_in_data(all_api_data, question)
+            answer = search_in_data(all_api_data, question + ' ' + all_instructions)
             
             if answer:
                 print(f"✅ Found answer in API data: {answer}")
                 return answer
             else:
                 print(f"⚠️ Could not find answer in API data, trying LLM...")
-                context_data = f"\n\nAPI Data:\n{json.dumps(all_api_data, indent=2)}\n"
+                context_data = f"\n\nAPI Data (sample):\n{json.dumps(all_api_data[:5], indent=2)}\n"
+                context_data += f"\nTotal items: {len(all_api_data)}\n"
         else:
             print(f"⚠️ No API data fetched, trying LLM...")
     
@@ -493,7 +564,7 @@ Solve this quiz question following these rules:
 Important:
 - Maximum 100 characters
 - Direct answer only
-- Just the value requested (name, number, city, etc.)
+- Just the value requested (name, number, city, sum, etc.)
 
 Answer:"""
     
@@ -504,7 +575,7 @@ Answer:"""
         lines = [l.strip() for l in answer.split('\n') if l.strip()]
         answer = lines[0] if lines else answer
         
-        for prefix in ['Answer:', 'The answer is:', 'Result:', 'answer:', 'A:', 'The name is:', 'Name:', 'City:', 'The city is:']:
+        for prefix in ['Answer:', 'The answer is:', 'Result:', 'answer:', 'A:', 'The name is:', 'Name:', 'City:', 'The city is:', 'Sum:', 'Total:']:
             if answer.lower().startswith(prefix.lower()):
                 answer = answer[len(prefix):].strip()
         
