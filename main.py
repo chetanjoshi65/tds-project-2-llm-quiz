@@ -139,16 +139,16 @@ def clean_price(price: Any) -> Optional[float]:
         cleaned = price.strip()
         
         # Check for invalid strings (case-insensitive)
-        if not cleaned or cleaned.lower() in ['invalid', 'null', 'n/a', 'na', 'none', 'undefined', 'nan', '']:
-            return None
+        if not cleaned or cleaned.lower() in ['invalid', 'null', 'n/a', 'na', 'none', 'undefined', 'nan', '', 'free']:
+            return None  # ← CHANGED: "free" returns None, not 0
         
         # Remove currency symbols and thousands separators
         cleaned = cleaned.replace('$', '').replace('€', '').replace('£', '').replace('₹', '')
         cleaned = cleaned.replace(',', '')  # Remove commas
         cleaned = cleaned.replace(' ', '')  # Remove spaces
         
-        # Handle special cases
-        if cleaned.lower() == 'free' or cleaned == '0':
+        # Handle zero
+        if cleaned == '0':
             return 0.0
         
         # Try to parse as float
@@ -364,7 +364,8 @@ def search_in_data(data: List[Dict], search_criteria: str) -> Optional[str]:
         for i, item in enumerate(data[:3]):
             if isinstance(item, dict):
                 price_val = item.get('price', 'NO_FIELD')
-                print(f"     Item {i+1}: {item}")
+                cleaned = clean_price(price_val) if price_val != 'NO_FIELD' else None
+                print(f"     Item {i+1}: {item} → cleaned: {cleaned}")
         
         for item in data:
             if isinstance(item, dict):
