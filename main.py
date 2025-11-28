@@ -82,22 +82,33 @@ def extract_headers_from_instructions(instructions: str) -> Dict[str, str]:
     """
     headers = {}
     
-    # Pattern: "header X-API-Key with value weather-alpha-key"
-    header_pattern = r'header\s+[`"\']?([A-Za-z0-9\-]+)[`"\']?\s+with\s+value\s+[`"\']?([A-Za-z0-9\-]+)[`"\']?'
+    # Pattern 1: "header X-API-Key with value weather-alpha-key"
+    # Pattern 1b: "header X-API-Key with the value weather-alpha-key"
+    header_pattern = r'header\s+[`"\']?([A-Za-z0-9\-]+)[`"\']?\s+with\s+(?:the\s+)?value\s+[`"\']?([A-Za-z0-9\-]+)[`"\']?'
     matches = re.findall(header_pattern, instructions, re.IGNORECASE)
     
     for header_name, header_value in matches:
         headers[header_name] = header_value
         print(f"🔑 Extracted header: {header_name} = {header_value}")
     
-    # Pattern: "X-API-Key: weather-alpha-key"
-    header_pattern2 = r'[`"\']?([A-Za-z0-9\-]+)[`"\']?\s*:\s*[`"\']?([A-Za-z0-9\-]+)[`"\']?'
-    matches2 = re.findall(header_pattern2, instructions)
+    # Pattern 2: "sending a header X-API-Key with value weather-alpha-key"
+    header_pattern2 = r'sending\s+a\s+header\s+[`"\']?([A-Za-z0-9\-]+)[`"\']?\s+with\s+(?:the\s+)?value\s+[`"\']?([A-Za-z0-9\-]+)[`"\']?'
+    matches2 = re.findall(header_pattern2, instructions, re.IGNORECASE)
     
     for header_name, header_value in matches2:
-        if header_name.upper().startswith('X-') or 'API' in header_name.upper() or 'KEY' in header_name.upper():
-            headers[header_name] = header_value
-            print(f"🔑 Extracted header (alt pattern): {header_name} = {header_value}")
+        headers[header_name] = header_value
+        print(f"🔑 Extracted header (pattern 2): {header_name} = {header_value}")
+    
+    # Pattern 3: "X-API-Key: weather-alpha-key" or "`X-API-Key` with value `weather-alpha-key`"
+    header_pattern3 = r'[`"\']?([A-Za-z0-9\-]+)[`"\']?\s*[:\s]+\s*[`"\']?([A-Za-z0-9\-]+)[`"\']?'
+    matches3 = re.findall(header_pattern3, instructions)
+    
+    for header_name, header_value in matches3:
+        # Only extract if it looks like a header (contains "API", "Key", "Auth", etc.)
+        if any(word in header_name.upper() for word in ['API', 'KEY', 'AUTH', 'TOKEN', 'X-']):
+            if header_name not in headers:  # Don't override already found headers
+                headers[header_name] = header_value
+                print(f"🔑 Extracted header (pattern 3): {header_name} = {header_value}")
     
     return headers
 
